@@ -143,11 +143,13 @@ static inline int con_debug_leave(void)
 #define CON_EXTENDED	(64) /* Use the extended output format a la /dev/kmsg */
 #ifdef CONFIG_PSTORE_CONSOLE_FORCE
 #define CON_PSTORE	(128) /* Print to pstore console anyway */
+#define CON_RAW		(256) /* Supports raw write mode */
 #endif
 
 struct console {
 	char	name[16];
 	void	(*write)(struct console *, const char *, unsigned);
+	void    (*write_raw)(struct console *, const char *, unsigned);
 	int	(*read)(struct console *, char *, unsigned);
 	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);

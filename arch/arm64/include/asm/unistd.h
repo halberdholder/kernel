@@ -59,3 +59,5 @@
 #endif
 
 #define NR_syscalls (__NR_syscalls)
+
+#define __ARM_ipipe_syscall	0x10000000
