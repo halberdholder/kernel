@@ -204,3 +204,6 @@ LOGO_KERNEL := $(notdir $(wildcard $(srctree)/logo_kernel.bmp))
 
 CLEAN_DIRS += out
 CLEAN_FILES += boot.img kernel.img resource.img zboot.img
+
+KBUILD_CFLAGS += -Iarch/$(SRCARCH)/xenomai/include -Iinclude/xenomai
+core-$(CONFIG_XENOMAI) += arch/arm64/xenomai/
