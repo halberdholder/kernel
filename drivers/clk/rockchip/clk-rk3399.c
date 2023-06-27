@@ -1505,7 +1505,7 @@ static struct rockchip_clk_branch rk3399_clk_branches[] __initdata = {
 	     2, GFLAGS),
 	GATE(0, "clk_ddrc_gpll_src", "gpll", 0, RK3399_CLKGATE_CON(3),
 	     3, GFLAGS),
-	COMPOSITE_DDRCLK(SCLK_DDRC, "sclk_ddrc", mux_ddrclk_p, 0,
+	COMPOSITE_DDRCLK(SCLK_DDRCLK, "sclk_ddrc", mux_ddrclk_p, 0,
 		       RK3399_CLKSEL_CON(6), 4, 2, 0, 0, ROCKCHIP_DDRCLK_SIP),
 };
 
