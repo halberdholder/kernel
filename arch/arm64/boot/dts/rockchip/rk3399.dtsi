@@ -1173,7 +1173,7 @@
 		reg-io-width = <4>;
 		pinctrl-names = "default";
 		pinctrl-0 = <&uart4_xfer>;
-		status = "disabled";
+		status = "okay";
 	};
 
 	i2c4: i2c@ff3d0000 {
