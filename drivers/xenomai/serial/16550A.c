@@ -197,7 +197,10 @@ static void rt_16550_tx_fill(struct rt_16550_context *ctx)
 	unsigned long base = ctx->base_addr;
 	int mode = rt_16550_io_mode_from_ctx(ctx);
 
-/*	if (uart->modem & MSR_CTS)*/
+	printk(XENO_INFO "rt_16550_tx_fill count=%d out_npend=%lu\n",
+	       ctx->tx_fifo, ctx->out_npend);
+
+	/*	if (uart->modem & MSR_CTS)*/
 	{
 		for (count = ctx->tx_fifo;
 		     (count > 0) && (ctx->out_npend > 0);
@@ -975,6 +978,9 @@ ssize_t rt_16550_write(struct rtdm_fd *fd, const void *buf, size_t nbyte)
 	while (nbyte > 0) {
 		rtdm_lock_get_irqsave(&ctx->lock, lock_ctx);
 
+		printk(XENO_INFO "rt_16550_write ctx->out_npend=%lu\n",
+		       ctx->out_npend);
+
 		free = OUT_BUFFER_SIZE - ctx->out_npend;
 
 		if (free > 0) {
@@ -1030,6 +1036,7 @@ ssize_t rt_16550_write(struct rtdm_fd *fd, const void *buf, size_t nbyte)
 
 			lsr = rt_16550_reg_in(rt_16550_io_mode_from_ctx(ctx),
 					      ctx->base_addr, LSR);
+			printk(XENO_INFO "rt_16550_write lsr=%#x\n", lsr);
 			if (lsr & RTSER_LSR_THR_EMTPY)
 				rt_16550_tx_fill(ctx);
 
@@ -1066,6 +1073,8 @@ ssize_t rt_16550_write(struct rtdm_fd *fd, const void *buf, size_t nbyte)
 	}
 
 	rtdm_mutex_unlock(&ctx->out_lock);
+
+	printk(XENO_INFO "rt_16550_write written=%lu, ret=%ld\n", written, ret);
 
 	if ((written > 0) && ((ret == 0) || (ret == -EAGAIN) ||
 			      (ret == -ETIMEDOUT) || (ret == -EINTR)))
@@ -1140,6 +1149,7 @@ int __init rt_16550_init(void)
 
 		/* Mask all UART interrupts and clear pending ones. */
 		base = rt_16550_base_addr(i);
+		printk(XENO_INFO "%s base addr %lx\n", name, base);
 		mode = rt_16550_io_mode(i);
 		rt_16550_reg_out(mode, base, IER, 0);
 		rt_16550_reg_in(mode, base, IIR);

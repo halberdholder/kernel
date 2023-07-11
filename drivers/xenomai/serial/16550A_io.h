@@ -160,11 +160,17 @@ rt_16550_init_io_ctx(int dev_id, struct rt_16550_context *ctx)
 static RT_16550_IO_INLINE u8
 rt_16550_reg_in(io_mode_t io_mode, unsigned long base, int off)
 {
+	int val = 0;
 	switch (io_mode) {
 	case MODE_PIO:
 		return inb(base + off);
 	default: /* MODE_MMIO */
-		return readb((void *)base + off);
+		// return readb((void *)base + off);
+		val = readl((char *)base + (off << 2));
+		printk(XENO_INFO
+		       "rt_16550_reg_in base=%lx off=%d iomem=%lx read val=%d\n",
+		       base, off, (base + (off << 2)), val);
+		return val & 0xff;
 	}
 }
 
@@ -176,7 +182,8 @@ rt_16550_reg_out(io_mode_t io_mode, unsigned long base, int off, u8 val)
 		outb(val, base + off);
 		break;
 	case MODE_MMIO:
-		writeb(val, (void *)base + off);
+		writel((int)val, (char *)base + (off << 2));
+		// writeb(val, (void *)base + off);
 		break;
 	}
 }
@@ -189,7 +196,8 @@ static int rt_16550_init_io(int dev_id, char* name)
 			return -EBUSY;
 		break;
 	case MODE_MMIO:
-		mapped_io[dev_id] = ioremap(rt_16550_addr_param(dev_id), 8);
+		// mapped_io[dev_id] = ioremap(rt_16550_addr_param(dev_id), 256);
+		mapped_io[dev_id] = (void *)rt_16550_addr_param(dev_id);
 		if (!mapped_io[dev_id])
 			return -EBUSY;
 		break;
@@ -204,7 +212,7 @@ static void rt_16550_release_io(int dev_id)
 		release_region(io[dev_id], 8);
 		break;
 	case MODE_MMIO:
-		iounmap(mapped_io[dev_id]);
+		// iounmap(mapped_io[dev_id]);
 		break;
 	}
 }

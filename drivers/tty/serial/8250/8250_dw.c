@@ -577,6 +577,9 @@ static int dw8250_probe(struct platform_device *pdev)
 	if (!p->membase)
 		return -ENOMEM;
 
+	pr_warn("================ dw8250 regs_start=%#llx resource_size=%llu membase=%px\n",
+		regs->start, resource_size(regs), p->membase);
+
 	data = devm_kzalloc(dev, sizeof(*data), GFP_KERNEL);
 	if (!data)
 		return -ENOMEM;
@@ -601,6 +604,9 @@ static int dw8250_probe(struct platform_device *pdev)
 		p->serial_in = dw8250_serial_in32;
 		p->serial_out = dw8250_serial_out32;
 	}
+
+	pr_warn("================ dw8250 regshift=%d iotype=%d 16550_compatible=%d\n",
+		p->regshift, p->iotype, data->uart_16550_compatible);
 
 	if (device_property_read_bool(dev, "dcd-override")) {
 		/* Always report DCD as active */
