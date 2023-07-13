@@ -83,7 +83,8 @@ struct rt_16550_context {
 	rtdm_lock_t lock;		/* lock to protect context struct */
 
 	unsigned long base_addr;	/* hardware IO base address */
-#ifdef CONFIG_XENO_DRIVERS_16550A_ANY
+#if defined(CONFIG_XENO_DRIVERS_16550A_ANY) ||                                 \
+	defined(CONFIG_XENO_DRIVERS_16550A_MMIO)
 	int io_mode;			/* hardware IO-access mode */
 #endif
 	int tx_fifo;			/* cached global tx_fifo[<device>] */
@@ -126,7 +127,7 @@ static struct rtdm_device *device[MAX_DEVICES];
 
 static unsigned int irq[MAX_DEVICES];
 static unsigned long irqtype[MAX_DEVICES] = {
-	[0 ... MAX_DEVICES-1] = RTDM_IRQTYPE_SHARED | RTDM_IRQTYPE_EDGE
+	[0 ... MAX_DEVICES-1] = RTDM_IRQTYPE_EDGE
 };
 static unsigned int baud_base[MAX_DEVICES];
 static int tx_fifo[MAX_DEVICES];
@@ -143,6 +144,7 @@ MODULE_PARM_DESC(tx_fifo, "Transmitter FIFO size");
 #include "16550A_io.h"
 #include "16550A_pnp.h"
 #include "16550A_pci.h"
+#include "16550A_platform.h"
 
 static inline int rt_16550_rx_interrupt(struct rt_16550_context *ctx,
 					uint64_t * timestamp)
@@ -197,7 +199,7 @@ static void rt_16550_tx_fill(struct rt_16550_context *ctx)
 	unsigned long base = ctx->base_addr;
 	int mode = rt_16550_io_mode_from_ctx(ctx);
 
-/*	if (uart->modem & MSR_CTS)*/
+	/*	if (uart->modem & MSR_CTS)*/
 	{
 		for (count = ctx->tx_fifo;
 		     (count > 0) && (ctx->out_npend > 0);
@@ -1108,13 +1110,14 @@ int __init rt_16550_init(void)
 
 	rt_16550_pnp_init();
 	rt_16550_pci_init();
+	rt_16550_platform_init();
 
 	for (i = 0; i < MAX_DEVICES; i++) {
-		if (!rt_16550_addr_param(i))
+		if (!rt_16550_addr_param_valid(i))
 			continue;
 
 		err = -EINVAL;
-		if (!irq[i] || !rt_16550_addr_param_valid(i))
+		if (!irq[i])
 			goto cleanup_out;
 
 		dev = kmalloc(sizeof(struct rtdm_device) +
@@ -1157,13 +1160,13 @@ int __init rt_16550_init(void)
 
 	return 0;
 
-      release_io_out:
+release_io_out:
 	rt_16550_release_io(i);
 
-      kfree_out:
+kfree_out:
 	kfree(dev);
 
-      cleanup_out:
+cleanup_out:
 	rt_16550_exit();
 
 	return err;
@@ -1182,6 +1185,7 @@ void rt_16550_exit(void)
 
 	rt_16550_pci_cleanup();
 	rt_16550_pnp_cleanup();
+	rt_16550_platform_cleanup();
 }
 
 module_init(rt_16550_init);
