@@ -9,6 +9,9 @@
  * LCR is written whilst busy.  If it is, then a busy detect interrupt is
  * raised, the LCR needs to be rewritten and the uart status register read.
  */
+
+#if !defined(CONFIG_XENO_DRIVERS_16550A_PCI) && !defined(CONFIG_PNP)
+
 #include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/io.h>
@@ -27,51 +30,109 @@
 
 #include <asm/byteorder.h>
 
-#include "8250.h"
+#include <rtdm/driver.h>
+
+#include <linux/serial_8250.h>
+#include <linux/serial_reg.h>
+#include <linux/dmaengine.h>
+
+struct uart_8250_dma {
+	int (*tx_dma)(struct uart_8250_port *p);
+	int (*rx_dma)(struct uart_8250_port *p);
+
+	/* Filter function */
+	dma_filter_fn fn;
+	/* Parameter to the filter function */
+	void *rx_param;
+	void *tx_param;
+
+	struct dma_slave_config rxconf;
+	struct dma_slave_config txconf;
+
+	struct dma_chan *rxchan;
+	struct dma_chan *txchan;
+
+	/* Device address base for DMA operations */
+	phys_addr_t rx_dma_addr;
+	phys_addr_t tx_dma_addr;
+
+	/* DMA address of the buffer in memory */
+	dma_addr_t rx_addr;
+	dma_addr_t tx_addr;
+
+	dma_cookie_t rx_cookie;
+	dma_cookie_t tx_cookie;
+
+	void *rx_buf;
+
+	size_t rx_size;
+	size_t tx_size;
+
+	unsigned char tx_running;
+	unsigned char tx_err;
+	unsigned char rx_running;
+#ifdef CONFIG_ARCH_ROCKCHIP
+	size_t rx_index;
+#endif
+};
+
+#define UART_CAP_FIFO (1 << 8) /* UART has FIFO */
+#define UART_CAP_EFR (1 << 9) /* UART has EFR */
+#define UART_CAP_SLEEP (1 << 10) /* UART has IER sleep */
+#define UART_CAP_AFE (1 << 11) /* MCR-based hw flow control */
+#define UART_CAP_UUE (1 << 12) /* UART needs IER bit 6 set (Xscale) */
+#define UART_CAP_RTOIE (1 << 13) /* UART needs IER bit 4 set (Xscale, Tegra) */
+#define UART_CAP_HFIFO (1 << 14) /* UART has a "hidden" FIFO */
+#define UART_CAP_RPM (1 << 15) /* Runtime PM is active while idle */
+#define UART_CAP_IRDA (1 << 16) /* UART supports IrDA line discipline */
+/* Mini UART on BCM283X family lacks: STOP PARITY EPAR SPAR WLEN5 WLEN6 */
+#define UART_CAP_MINI (1 << 17)
+
+void serial8250_clear_and_reinit_fifos(struct uart_8250_port *p);
 
 /* Offsets for the DesignWare specific registers */
-#define DW_UART_USR	0x1f /* UART Status Register */
-#define DW_UART_DLF	0xc0 /* Divisor Latch Fraction Register */
-#define DW_UART_RFL	0x21 /* UART Receive Fifo Level Register */
-#define DW_UART_CPR	0xf4 /* Component Parameter Register */
-#define DW_UART_UCV	0xf8 /* UART Component Version */
+#define DW_UART_USR 0x1f /* UART Status Register */
+#define DW_UART_DLF 0xc0 /* Divisor Latch Fraction Register */
+#define DW_UART_RFL 0x21 /* UART Receive Fifo Level Register */
+#define DW_UART_CPR 0xf4 /* Component Parameter Register */
+#define DW_UART_UCV 0xf8 /* UART Component Version */
 
 /* Component Parameter Register bits */
-#define DW_UART_CPR_ABP_DATA_WIDTH	(3 << 0)
-#define DW_UART_CPR_AFCE_MODE		(1 << 4)
-#define DW_UART_CPR_THRE_MODE		(1 << 5)
-#define DW_UART_CPR_SIR_MODE		(1 << 6)
-#define DW_UART_CPR_SIR_LP_MODE		(1 << 7)
-#define DW_UART_CPR_ADDITIONAL_FEATURES	(1 << 8)
-#define DW_UART_CPR_FIFO_ACCESS		(1 << 9)
-#define DW_UART_CPR_FIFO_STAT		(1 << 10)
-#define DW_UART_CPR_SHADOW		(1 << 11)
-#define DW_UART_CPR_ENCODED_PARMS	(1 << 12)
-#define DW_UART_CPR_DMA_EXTRA		(1 << 13)
-#define DW_UART_CPR_FIFO_MODE		(0xff << 16)
+#define DW_UART_CPR_ABP_DATA_WIDTH (3 << 0)
+#define DW_UART_CPR_AFCE_MODE (1 << 4)
+#define DW_UART_CPR_THRE_MODE (1 << 5)
+#define DW_UART_CPR_SIR_MODE (1 << 6)
+#define DW_UART_CPR_SIR_LP_MODE (1 << 7)
+#define DW_UART_CPR_ADDITIONAL_FEATURES (1 << 8)
+#define DW_UART_CPR_FIFO_ACCESS (1 << 9)
+#define DW_UART_CPR_FIFO_STAT (1 << 10)
+#define DW_UART_CPR_SHADOW (1 << 11)
+#define DW_UART_CPR_ENCODED_PARMS (1 << 12)
+#define DW_UART_CPR_DMA_EXTRA (1 << 13)
+#define DW_UART_CPR_FIFO_MODE (0xff << 16)
 /* Helper for fifo size calculation */
-#define DW_UART_CPR_FIFO_SIZE(a)	(((a >> 16) & 0xff) * 16)
+#define DW_UART_CPR_FIFO_SIZE(a) (((a >> 16) & 0xff) * 16)
 
 /* DesignWare specific register fields */
-#define DW_UART_MCR_SIRE		BIT(6)
+#define DW_UART_MCR_SIRE BIT(6)
 
 struct dw8250_data {
-	u8			usr_reg;
-	u8			dlf_size;
-	int			line;
-	int			msr_mask_on;
-	int			msr_mask_off;
-	struct clk		*clk;
-	struct clk		*pclk;
-	struct reset_control	*rst;
-	struct uart_8250_dma	dma;
+	u8 usr_reg;
+	u8 dlf_size;
+	int line;
+	int msr_mask_on;
+	int msr_mask_off;
+	struct clk *clk;
+	struct clk *pclk;
+	struct reset_control *rst;
+	struct uart_8250_dma dma;
 #ifdef CONFIG_ARCH_ROCKCHIP
-	int			irq;
-	int			irq_wake;
-	int			enable_wakeup;
+	int irq;
+	int irq_wake;
+	int enable_wakeup;
 #endif
-	unsigned int		skip_autocfg:1;
-	unsigned int		uart_16550_compatible:1;
+	unsigned int skip_autocfg : 1;
+	unsigned int uart_16550_compatible : 1;
 };
 
 static inline u32 dw8250_readl_ext(struct uart_port *p, int offset)
@@ -129,7 +190,7 @@ static void dw8250_check_lcr(struct uart_port *p, int value)
 			__raw_writeq(value & 0xff, offset);
 		else
 #endif
-		if (p->iotype == UPIO_MEM32)
+			if (p->iotype == UPIO_MEM32)
 			writel(value, offset);
 		else if (p->iotype == UPIO_MEM32BE)
 			iowrite32be(value, offset);
@@ -150,7 +211,7 @@ static void dw8250_tx_wait_empty(struct uart_port *p)
 	unsigned int lsr;
 
 	while (tries--) {
-		lsr = readb (p->membase + (UART_LSR << p->regshift));
+		lsr = readb(p->membase + (UART_LSR << p->regshift));
 		if (lsr & UART_LSR_TEMT)
 			break;
 
@@ -159,7 +220,7 @@ static void dw8250_tx_wait_empty(struct uart_port *p)
 		 * the buffer has still not emptied, allow more time for low-
 		 * speed links. */
 		if (tries < delay_threshold)
-			udelay (1);
+			udelay(1);
 	}
 }
 
@@ -176,7 +237,6 @@ static void dw8250_serial_out38x(struct uart_port *p, int offset, int value)
 	if (offset == UART_LCR && !d->uart_16550_compatible)
 		dw8250_check_lcr(p, value);
 }
-
 
 static void dw8250_serial_out(struct uart_port *p, int offset, int value)
 {
@@ -248,11 +308,10 @@ static void dw8250_serial_out32be(struct uart_port *p, int offset, int value)
 
 static unsigned int dw8250_serial_in32be(struct uart_port *p, int offset)
 {
-       unsigned int value = ioread32be(p->membase + (offset << p->regshift));
+	unsigned int value = ioread32be(p->membase + (offset << p->regshift));
 
-       return dw8250_modify_msr(p, offset, value);
+	return dw8250_modify_msr(p, offset, value);
 }
-
 
 static int dw8250_handle_irq(struct uart_port *p)
 {
@@ -273,8 +332,9 @@ static int dw8250_handle_irq(struct uart_port *p)
 		usr = p->serial_in(p, d->usr_reg);
 		status = p->serial_in(p, UART_LSR);
 		rfl = p->serial_in(p, DW_UART_RFL);
-		if (!(status & (UART_LSR_DR | UART_LSR_BI)) && !(usr & 0x1) && (rfl == 0))
-			(void) p->serial_in(p, UART_RX);
+		if (!(status & (UART_LSR_DR | UART_LSR_BI)) && !(usr & 0x1) &&
+		    (rfl == 0))
+			(void)p->serial_in(p, UART_RX);
 
 		spin_unlock_irqrestore(&p->lock, flags);
 	}
@@ -292,8 +352,8 @@ static int dw8250_handle_irq(struct uart_port *p)
 	return 0;
 }
 
-static void
-dw8250_do_pm(struct uart_port *port, unsigned int state, unsigned int old)
+static void dw8250_do_pm(struct uart_port *port, unsigned int state,
+			 unsigned int old)
 {
 	if (!state)
 		pm_runtime_get_sync(port->dev);
@@ -413,8 +473,7 @@ static bool dw8250_idma_filter(struct dma_chan *chan, void *param)
  * we have: div(F) * (16 * baud) = rem
  * so frac = 2^dlf_size * rem / (16 * baud) = (rem << dlf_size) / (16 * baud)
  */
-static unsigned int dw8250_get_divisor(struct uart_port *p,
-				       unsigned int baud,
+static unsigned int dw8250_get_divisor(struct uart_port *p, unsigned int baud,
 				       unsigned int *frac)
 {
 	unsigned int quot, rem, base_baud = baud * 16;
@@ -448,7 +507,8 @@ static void dw8250_quirks(struct uart_port *p, struct dw8250_data *data)
 		if (of_device_is_compatible(np, "cavium,octeon-3860-uart")) {
 			p->serial_in = dw8250_serial_inq;
 			p->serial_out = dw8250_serial_outq;
-			p->flags = UPF_SKIP_TEST | UPF_SHARE_IRQ | UPF_FIXED_TYPE;
+			p->flags =
+				UPF_SKIP_TEST | UPF_SHARE_IRQ | UPF_FIXED_TYPE;
 			p->type = PORT_OCTEON;
 			data->usr_reg = 0x27;
 			data->skip_autocfg = true;
@@ -491,8 +551,8 @@ static void dw8250_setup_port(struct uart_port *p)
 	if (!reg)
 		return;
 
-	dev_dbg(p->dev, "Designware UART version %c.%c%c\n",
-		(reg >> 24) & 0xff, (reg >> 16) & 0xff, (reg >> 8) & 0xff);
+	dev_info(p->dev, "Designware UART version %c.%c%c\n",
+		 (reg >> 24) & 0xff, (reg >> 16) & 0xff, (reg >> 8) & 0xff);
 
 	dw8250_writel_ext(p, DW_UART_DLF, ~0U);
 	reg = dw8250_readl_ext(p, DW_UART_DLF);
@@ -527,17 +587,37 @@ static void dw8250_setup_port(struct uart_port *p)
 #ifdef CONFIG_ARCH_ROCKCHIP
 		up->tx_loadsz = p->fifosize * 3 / 4;
 #endif
-		up->capabilities = UART_CAP_FIFO;
+		up->capabilities = UART_CAP_FIFO; // 0x100
 	}
 
 	if (reg & DW_UART_CPR_AFCE_MODE)
-		up->capabilities |= UART_CAP_AFE;
+		up->capabilities |= UART_CAP_AFE; // 0x900
 
 	if (reg & DW_UART_CPR_SIR_MODE)
-		up->capabilities |= UART_CAP_IRDA;
+		up->capabilities |= UART_CAP_IRDA; //0x10900
 }
 
-static int dw8250_probe(struct platform_device *pdev)
+static int device_id = 0;
+
+static void xeno16550A_register_8250_port(struct uart_port *p)
+{
+	mapped_io[device_id] = p->membase;
+	irq[device_id] = p->irq;
+	baud_base[device_id] = p->uartclk / 16;
+	tx_fifo[device_id] = p->fifosize;
+
+	if (p->iotype == UPIO_MEM32)
+		iotype[device_id] = MODE_MMIO32;
+
+	printk(XENO_INFO
+	       "rtser%d at MMIO %#llx (irq=%d, baud_base=%u tx_fifo=%d)\n",
+	       device_id, p->mapbase, p->irq, baud_base[device_id],
+	       p->fifosize);
+
+	++device_id;
+}
+
+static int xeno16550A_probe(struct platform_device *pdev)
 {
 	struct uart_8250_port uart = {};
 	struct resource *regs = platform_get_resource(pdev, IORESOURCE_MEM, 0);
@@ -547,6 +627,11 @@ static int dw8250_probe(struct platform_device *pdev)
 	struct dw8250_data *data;
 	int err;
 	u32 val;
+
+	if (device_id >= MAX_DEVICES) {
+		dev_err(dev, "xeno16550A_probe max devices\n");
+		return -EINVAL;
+	}
 
 	if (!regs) {
 		dev_err(dev, "no registers defined\n");
@@ -560,18 +645,18 @@ static int dw8250_probe(struct platform_device *pdev)
 	}
 
 	spin_lock_init(&p->lock);
-	p->mapbase	= regs->start;
-	p->irq		= irq;
-	p->handle_irq	= dw8250_handle_irq;
-	p->pm		= dw8250_do_pm;
-	p->type		= PORT_8250;
-	p->flags	= UPF_SHARE_IRQ | UPF_FIXED_PORT;
-	p->dev		= dev;
-	p->iotype	= UPIO_MEM;
-	p->serial_in	= dw8250_serial_in;
-	p->serial_out	= dw8250_serial_out;
-	p->set_ldisc	= dw8250_set_ldisc;
-	p->set_termios	= dw8250_set_termios;
+	p->mapbase = regs->start;
+	p->irq = irq;
+	p->handle_irq = dw8250_handle_irq;
+	p->pm = dw8250_do_pm;
+	p->type = PORT_8250;
+	p->flags = UPF_SHARE_IRQ | UPF_FIXED_PORT;
+	p->dev = dev;
+	p->iotype = UPIO_MEM;
+	p->serial_in = dw8250_serial_in;
+	p->serial_out = dw8250_serial_out;
+	p->set_ldisc = dw8250_set_ldisc;
+	p->set_termios = dw8250_set_termios;
 
 	p->membase = devm_ioremap(dev, regs->start, resource_size(regs));
 	if (!p->membase)
@@ -584,12 +669,12 @@ static int dw8250_probe(struct platform_device *pdev)
 	data->dma.fn = dw8250_fallback_dma_filter;
 	data->usr_reg = DW_UART_USR;
 #ifdef CONFIG_ARCH_ROCKCHIP
-	data->irq	= irq;
+	data->irq = irq;
 #endif
 	p->private_data = data;
 
-	data->uart_16550_compatible = device_property_read_bool(dev,
-						"snps,uart-16550-compatible");
+	data->uart_16550_compatible =
+		device_property_read_bool(dev, "snps,uart-16550-compatible");
 
 	err = device_property_read_u32(dev, "reg-shift", &val);
 	if (!err)
@@ -600,30 +685,6 @@ static int dw8250_probe(struct platform_device *pdev)
 		p->iotype = UPIO_MEM32;
 		p->serial_in = dw8250_serial_in32;
 		p->serial_out = dw8250_serial_out32;
-	}
-
-	if (device_property_read_bool(dev, "dcd-override")) {
-		/* Always report DCD as active */
-		data->msr_mask_on |= UART_MSR_DCD;
-		data->msr_mask_off |= UART_MSR_DDCD;
-	}
-
-	if (device_property_read_bool(dev, "dsr-override")) {
-		/* Always report DSR as active */
-		data->msr_mask_on |= UART_MSR_DSR;
-		data->msr_mask_off |= UART_MSR_DDSR;
-	}
-
-	if (device_property_read_bool(dev, "cts-override")) {
-		/* Always report CTS as active */
-		data->msr_mask_on |= UART_MSR_CTS;
-		data->msr_mask_off |= UART_MSR_DCTS;
-	}
-
-	if (device_property_read_bool(dev, "ri-override")) {
-		/* Always report Ring indicator as inactive */
-		data->msr_mask_off |= UART_MSR_RI;
-		data->msr_mask_off |= UART_MSR_TERI;
 	}
 
 #ifdef CONFIG_ARCH_ROCKCHIP
@@ -694,13 +755,18 @@ static int dw8250_probe(struct platform_device *pdev)
 		uart.dma = &data->dma;
 	}
 
-	data->line = serial8250_register_8250_port(&uart);
+	// data->line = serial8250_register_8250_port(&uart);
+	data->line = p->line;
 	if (data->line < 0) {
 		err = data->line;
 		goto err_reset;
 	}
 
+	xeno16550A_register_8250_port(p);
+
 #ifdef CONFIG_ARCH_ROCKCHIP
+	printk(XENO_INFO "dw8250_probe enable_wakeup=%d\n",
+	       data->enable_wakeup);
 	if (data->enable_wakeup)
 		device_init_wakeup(&pdev->dev, true);
 #endif
@@ -732,7 +798,7 @@ static int dw8250_remove(struct platform_device *pdev)
 
 	pm_runtime_get_sync(&pdev->dev);
 
-	serial8250_unregister_port(data->line);
+	// serial8250_unregister_port(data->line);
 
 	reset_control_assert(data->rst);
 
@@ -753,114 +819,41 @@ static int dw8250_remove(struct platform_device *pdev)
 	return 0;
 }
 
-#ifdef CONFIG_PM_SLEEP
-static int dw8250_suspend(struct device *dev)
-{
-	struct dw8250_data *data = dev_get_drvdata(dev);
-
-#ifdef CONFIG_ARCH_ROCKCHIP
-	if (device_may_wakeup(dev)) {
-		if (!enable_irq_wake(data->irq))
-			data->irq_wake = 1;
-		return 0;
-	}
-#endif
-	serial8250_suspend_port(data->line);
-
-	return 0;
-}
-
-static int dw8250_resume(struct device *dev)
-{
-	struct dw8250_data *data = dev_get_drvdata(dev);
-
-#ifdef CONFIG_ARCH_ROCKCHIP
-	if (device_may_wakeup(dev)) {
-		if (data->irq_wake) {
-			disable_irq_wake(data->irq);
-			data->irq_wake = 0;
-		}
-		return 0;
-	}
-#endif
-	serial8250_resume_port(data->line);
-
-	return 0;
-}
-#endif /* CONFIG_PM_SLEEP */
-
-#ifdef CONFIG_PM
-static int dw8250_runtime_suspend(struct device *dev)
-{
-	struct dw8250_data *data = dev_get_drvdata(dev);
-
-	if (!IS_ERR(data->clk))
-		clk_disable_unprepare(data->clk);
-
-	if (!IS_ERR(data->pclk))
-		clk_disable_unprepare(data->pclk);
-
-	return 0;
-}
-
-static int dw8250_runtime_resume(struct device *dev)
-{
-	struct dw8250_data *data = dev_get_drvdata(dev);
-
-	if (!IS_ERR(data->pclk))
-		clk_prepare_enable(data->pclk);
-
-	if (!IS_ERR(data->clk))
-		clk_prepare_enable(data->clk);
-
-	return 0;
-}
-#endif
-
-static const struct dev_pm_ops dw8250_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(dw8250_suspend, dw8250_resume)
-	SET_RUNTIME_PM_OPS(dw8250_runtime_suspend, dw8250_runtime_resume, NULL)
-};
-
 static const struct of_device_id dw8250_of_match[] = {
-	{ .compatible = "snps,dw-apb-uart" },
-	{ .compatible = "cavium,octeon-3860-uart" },
-	{ .compatible = "marvell,armada-38x-uart" },
-	{ .compatible = "renesas,rzn1-uart" },
+	{ .compatible = "snps,uart-16550-xeno" },
 	{ /* Sentinel */ }
 };
 MODULE_DEVICE_TABLE(of, dw8250_of_match);
 
-static const struct acpi_device_id dw8250_acpi_match[] = {
-	{ "INT33C4", 0 },
-	{ "INT33C5", 0 },
-	{ "INT3434", 0 },
-	{ "INT3435", 0 },
-	{ "80860F0A", 0 },
-	{ "8086228A", 0 },
-	{ "APMC0D08", 0},
-	{ "AMD0020", 0 },
-	{ "AMDI0020", 0 },
-	{ "BRCM2032", 0 },
-	{ "HISI0031", 0 },
-	{ },
-};
-MODULE_DEVICE_TABLE(acpi, dw8250_acpi_match);
-
 static struct platform_driver dw8250_platform_driver = {
 	.driver = {
-		.name		= "dw-apb-uart",
-		.pm		= &dw8250_pm_ops,
-		.of_match_table	= dw8250_of_match,
-		.acpi_match_table = dw8250_acpi_match,
+		.name = "uart-16550-xeno",
+		.of_match_table = dw8250_of_match,
 	},
-	.probe			= dw8250_probe,
-	.remove			= dw8250_remove,
+	.probe = xeno16550A_probe,
+	.remove = dw8250_remove,
 };
 
-module_platform_driver(dw8250_platform_driver);
+static inline void rt_16550_platform_init(void)
+{
+	platform_driver_register(&dw8250_platform_driver);
+}
 
-MODULE_AUTHOR("Jamie Iles");
-MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Synopsys DesignWare 8250 serial port driver");
-MODULE_ALIAS("platform:dw-apb-uart");
+static inline void rt_16550_platform_cleanup(void)
+{
+	if (device_id)
+		platform_driver_unregister(&dw8250_platform_driver);
+
+	device_id = 0;
+}
+
+#else /* !(CONFIG_XENO_DRIVERS_16550A_PCI) && !(CONFIG_PNP) */
+
+#define rt_16550_platform_init()                                               \
+	do {                                                                   \
+	} while (0)
+#define rt_16550_platform_cleanup()                                            \
+	do {                                                                   \
+	} while (0)
+
+#endif /* !CONFIG_XENO_DRIVERS_16550A_PCI || !CONFIG_PNP */

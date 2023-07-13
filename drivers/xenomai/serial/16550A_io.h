@@ -18,7 +18,7 @@
 
 /* Manages the I/O access method of the driver. */
 
-typedef enum { MODE_PIO, MODE_MMIO } io_mode_t;
+typedef enum { MODE_PIO, MODE_MMIO, MODE_MMIO32 } io_mode_t;
 
 #if defined(CONFIG_XENO_DRIVERS_16550A_PIO) || \
     defined(CONFIG_XENO_DRIVERS_16550A_ANY)
@@ -27,12 +27,17 @@ module_param_array(io, ulong, NULL, 0400);
 MODULE_PARM_DESC(io, "I/O port addresses of the serial devices");
 #endif /* CONFIG_XENO_DRIVERS_16550A_PIO || CONFIG_XENO_DRIVERS_16550A_ANY */
 
-#if defined(CONFIG_XENO_DRIVERS_16550A_MMIO) || \
-    defined(CONFIG_XENO_DRIVERS_16550A_ANY)
-static unsigned long mem[MAX_DEVICES];
+#if defined(CONFIG_XENO_DRIVERS_16550A_MMIO) ||                                \
+	defined(CONFIG_XENO_DRIVERS_16550A_ANY)
 static void *mapped_io[MAX_DEVICES];
+
+static unsigned long mem[MAX_DEVICES];
+static unsigned int iotype[MAX_DEVICES] = { [0 ... MAX_DEVICES - 1] = MODE_MMIO };
+
 module_param_array(mem, ulong, NULL, 0400);
+module_param_array(iotype, uint, NULL, 0400);
 MODULE_PARM_DESC(mem, "I/O memory addresses of the serial devices");
+MODULE_PARM_DESC(iotype, "memory I/O type(witdh) of ther serial devices");
 #endif /* CONFIG_XENO_DRIVERS_16550A_MMIO || CONFIG_XENO_DRIVERS_16550A_ANY */
 
 #ifdef CONFIG_XENO_DRIVERS_16550A_PIO
@@ -48,7 +53,7 @@ static inline unsigned long rt_16550_addr_param(int dev_id)
 
 static inline int rt_16550_addr_param_valid(int dev_id)
 {
-	return 1;
+	return io[dev_id];
 }
 
 static inline unsigned long rt_16550_base_addr(int dev_id)
@@ -77,7 +82,7 @@ rt_16550_init_io_ctx(int dev_id, struct rt_16550_context *ctx)
 
 #define RT_16550_IO_INLINE inline
 
-extern unsigned long io[]; /* dummy */
+static unsigned long io[1]; /* dummy */
 
 static inline unsigned long rt_16550_addr_param(int dev_id)
 {
@@ -86,7 +91,9 @@ static inline unsigned long rt_16550_addr_param(int dev_id)
 
 static inline int rt_16550_addr_param_valid(int dev_id)
 {
-	return 1;
+	if (mem[dev_id] && mapped_io[dev_id])
+		return 0;
+	return mem[dev_id] || mapped_io[dev_id];
 }
 
 static inline unsigned long rt_16550_base_addr(int dev_id)
@@ -96,19 +103,20 @@ static inline unsigned long rt_16550_base_addr(int dev_id)
 
 static inline io_mode_t rt_16550_io_mode(int dev_id)
 {
-	return MODE_MMIO;
+	return (io_mode_t)iotype[dev_id];
 }
 
 static inline io_mode_t
 rt_16550_io_mode_from_ctx(struct rt_16550_context *ctx)
 {
-	return MODE_MMIO;
+	return ctx->io_mode;
 }
 
 static inline void
 rt_16550_init_io_ctx(int dev_id, struct rt_16550_context *ctx)
 {
 	ctx->base_addr = (unsigned long)mapped_io[dev_id];
+	ctx->io_mode = iotype[dev_id];
 }
 
 #elif defined(CONFIG_XENO_DRIVERS_16550A_ANY)
@@ -122,7 +130,12 @@ static inline unsigned long rt_16550_addr_param(int dev_id)
 
 static inline int rt_16550_addr_param_valid(int dev_id)
 {
-	return !(io[dev_id] && mem[dev_id]);
+	if (io[dev_id])
+		return !(mem[dev_id] || mapped_io[dev_id]);
+	else if (mem[dev_id])
+		return !mapped_io[dev_id];
+	else
+		return mapped_io[dev_id];
 }
 
 static inline unsigned long rt_16550_base_addr(int dev_id)
@@ -132,7 +145,10 @@ static inline unsigned long rt_16550_base_addr(int dev_id)
 
 static inline io_mode_t rt_16550_io_mode(int dev_id)
 {
-	return (io[dev_id]) ? MODE_PIO : MODE_MMIO;
+	if (io[dev_id])
+		return MODE_PIO;
+
+	return iotype[dev_id];
 }
 
 static inline io_mode_t
@@ -149,7 +165,7 @@ rt_16550_init_io_ctx(int dev_id, struct rt_16550_context *ctx)
 		ctx->io_mode   = MODE_PIO;
 	} else {
 		ctx->base_addr = (unsigned long)mapped_io[dev_id];
-		ctx->io_mode   = MODE_MMIO;
+		ctx->io_mode = iotype[dev_id];
 	}
 }
 
@@ -160,17 +176,13 @@ rt_16550_init_io_ctx(int dev_id, struct rt_16550_context *ctx)
 static RT_16550_IO_INLINE u8
 rt_16550_reg_in(io_mode_t io_mode, unsigned long base, int off)
 {
-	int val = 0;
 	switch (io_mode) {
 	case MODE_PIO:
 		return inb(base + off);
-	default: /* MODE_MMIO */
-		// return readb((void *)base + off);
-		val = readl((char *)base + (off << 2));
-		printk(XENO_INFO
-		       "rt_16550_reg_in base=%lx off=%d iomem=%lx read val=%d\n",
-		       base, off, (base + (off << 2)), val);
-		return val & 0xff;
+	case MODE_MMIO:
+		return readb((void *)base + off);
+	default: /* MODE_MMIO32 */
+		return readl((char *)base + (off << 2)) & 0xff;
 	}
 }
 
@@ -182,8 +194,10 @@ rt_16550_reg_out(io_mode_t io_mode, unsigned long base, int off, u8 val)
 		outb(val, base + off);
 		break;
 	case MODE_MMIO:
+		writeb(val, (void *)base + off);
+		break;
+	case MODE_MMIO32:
 		writel((int)val, (char *)base + (off << 2));
-		// writeb(val, (void *)base + off);
 		break;
 	}
 }
@@ -196,8 +210,10 @@ static int rt_16550_init_io(int dev_id, char* name)
 			return -EBUSY;
 		break;
 	case MODE_MMIO:
-		// mapped_io[dev_id] = ioremap(rt_16550_addr_param(dev_id), 256);
-		mapped_io[dev_id] = (void *)rt_16550_addr_param(dev_id);
+	case MODE_MMIO32:
+		if (rt_16550_addr_param(dev_id))
+			mapped_io[dev_id] =
+				ioremap(rt_16550_addr_param(dev_id), 8);
 		if (!mapped_io[dev_id])
 			return -EBUSY;
 		break;
@@ -212,7 +228,9 @@ static void rt_16550_release_io(int dev_id)
 		release_region(io[dev_id], 8);
 		break;
 	case MODE_MMIO:
-		// iounmap(mapped_io[dev_id]);
+	case MODE_MMIO32:
+		if (rt_16550_addr_param(dev_id))
+			iounmap(mapped_io[dev_id]);
 		break;
 	}
 }

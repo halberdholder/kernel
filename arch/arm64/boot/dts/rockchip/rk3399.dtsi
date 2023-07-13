@@ -1164,7 +1164,7 @@
 	};
 
 	uart4: serial@ff370000 {
-		compatible = "rockchip,rk3399-uart", "snps,dw-apb-uart";
+		compatible = "rockchip,rk3399-uart", "snps,uart-16550-xeno";
 		reg = <0x0 0xff370000 0x0 0x100>;
 		clocks = <&pmucru SCLK_UART4_PMU>, <&pmucru PCLK_UART4_PMU>;
 		clock-names = "baudclk", "apb_pclk";
